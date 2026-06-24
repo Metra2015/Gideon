@@ -1,0 +1,112 @@
+version: "3.9"
+
+# ── Gideon Personal AI OS — Self-Hosted Stack ────────────────────────────
+#
+# Services:
+#   gideon   — Node.js backend + React frontend (port 5000)
+#   qdrant   — Vector database for semantic memory (port 6333)
+#   ollama   — Local LLM inference server (port 11434)
+#
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose logs -f gideon    # Stream logs
+#   docker compose down               # Stop
+#   docker compose down -v            # Stop + wipe volumes
+#
+# Ollama models (run after first start):
+#   docker exec -it gideon-ollama ollama pull qwen2.5-coder:7b
+#   docker exec -it gideon-ollama ollama pull nomic-embed-text
+#   docker exec -it gideon-ollama ollama pull llava  # optional — vision
+
+services:
+
+  # ── Gideon App ──────────────────────────────────────────────────────
+  gideon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gideon-app
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - gideon_data:/app/data          # SQLite database
+      - gideon_generated:/app/generated  # Vulcan-generated code files
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_URL: http://ollama:11434
+      # Optional: set Anthropic key for cloud LLM fallback
+      # ANTHROPIC_API_KEY: sk-ant-...
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/system/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Qdrant Vector Database ──────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    container_name: gideon-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__LOG_LEVEL: WARN
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Ollama Local LLM ────────────────────────────────────────────────
+  # GPU support: add `deploy.resources.reservations.devices` block below
+  # and change image to `ollama/ollama:latest` with NVIDIA runtime.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: gideon-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"
+      OLLAMA_NUM_PARALLEL: "2"
+    # ── GPU support (uncomment for NVIDIA) ──────────────────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  gideon_data:
+    driver: local
+  gideon_generated:
+    driver: local
+  qdrant_storage:
+    driver: local
+  ollama_models:
+    driver: local
